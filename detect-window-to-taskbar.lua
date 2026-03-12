@@ -63,30 +63,36 @@ end
 
 -- 默认配置
 local DEFAULT_CONFIG = {
-    PROCESS_PROCESSES_TEXT=[[cloudmusic
+    PROCESS_PROCESSES_TEXT=[[
+cloudmusic
 qqmusic
 kugou
 kwmusic
 wesing
-foobar2000]],
-    CLASS_PATTERNS_TEXT=[[DesktopLyrics
+foobar2000
+]],
+    CLASS_PATTERNS_TEXT=[[
+DesktopLyrics
 KwDeskLyricWnd
-ATL:79330D08
-ATL:7BF61FD0
-uie_eslyric_desktop_wnd_class]],
-    TITLE_PATTERNS_TEXT=[[歌词
+ATL:7A570D08
+ATL:7A571FD0
+floating_eslyric_wnd_class
+uie_eslyric_desktop_wnd_class
+]],
+    TITLE_PATTERNS_TEXT=[[
+歌词
 lyric
 字幕
-subtitle]],
+subtitle
+]],
 }
 
 -- 全局状态
 local state = {
     enable_timer=false,
     interval_sec=5,
-    debug_mode=false,
-    debug_print_all_windows=false,
     require_class_or_title_match=true,
+    print_all_windows=false, 
     process_processes={}, class_patterns={}, title_patterns={},
     utf16_cache={}, utf16_cache_order={},
     utf16_cache_size=0, utf16_cache_max=1000,
@@ -98,10 +104,6 @@ local state = {
 
 -- 日志函数
 local function log_info(msg) obs.script_log(obs.LOG_INFO,msg) end
-local function log_debug(msg) if state.debug_mode then log_info("[MATCH] "..msg) end end
-local function log_warn(msg) if state.debug_mode then log_info("[WARN] "..msg) end end
-local function log_all(msg) if state.debug_print_all_windows then log_info("[ALL] "..msg) end end
-
 local function log_info_throttled(msg,key,interval)
     interval=interval or 30
     local now=os.time()
@@ -111,6 +113,9 @@ local function log_info_throttled(msg,key,interval)
         return true
     end
     return false
+end
+local function log_all(msg)
+    if state.print_all_windows then log_info("[ALL] "..msg) end
 end
 
 -- 工具函数
@@ -140,7 +145,7 @@ local function rebuild_rules_from_settings(settings)
     state.class_patterns = parse_lines_to_array_lower(obs.obs_data_get_string(settings,"class_patterns_text"))
     state.title_patterns = parse_lines_to_array_lower(obs.obs_data_get_string(settings,"title_patterns_text"))
     state.require_class_or_title_match = obs.obs_data_get_bool(settings,"require_class_or_title_match")
-    log_debug(string.format("规则更新: processes=%d class=%d title=%d",
+    log_info(string.format("规则更新: processes=%d class=%d title=%d",
         (function() local c=0; for _ in pairs(state.process_processes) do c=c+1 end return c end)(),
         #state.class_patterns,#state.title_patterns))
 end
@@ -149,9 +154,8 @@ end
 local function utf16_to_utf8(wstr,len)
     if not wstr or len<=0 then return "" end
     if len>WIN_CONST.MAX_WINDOW_TITLE then len=WIN_CONST.MAX_WINDOW_TITLE end
-    local key = ffi.string(wstr,len*2,true)..":"..len
+    local key = tostring(ffi.cast("uintptr_t", wstr)) .. ":" .. len
     if state.utf16_cache[key] then
-        
         for i=#state.utf16_cache_order,1,-1 do
             if state.utf16_cache_order[i]==key then table.remove(state.utf16_cache_order,i) break end
         end
@@ -218,10 +222,7 @@ local function get_process_name(hwnd)
     if pid[0]==0 then return nil end
 
     local hProcess=kernel32.OpenProcess(WIN_CONST.PROCESS_QUERY_FLAGS,false,pid[0])
-    if not hProcess or hProcess==ffi.NULL then
-        log_warn("无法打开进程 hwnd="..key)
-        return nil
-    end
+    if not hProcess or hProcess==ffi.NULL then return nil end
 
     local wbuf=ffi.new("wchar_t[?]",WIN_CONST.MAX_PATH)
     local size=ffi.new("DWORD[1]",WIN_CONST.MAX_PATH)
@@ -256,8 +257,7 @@ local function set_taskbar_visible(hwnd)
     local has_appwindow = bit.band(ex_style,WIN_CONST.WS_EX_APPWINDOW) ~= 0
     local has_toolwindow = bit.band(ex_style,WIN_CONST.WS_EX_TOOLWINDOW) ~= 0
     if has_appwindow and not has_toolwindow then return false end
-    local new_style = bit.bor(ex_style,WIN_CONST.WS_EX_APPWINDOW)
-    new_style = bit.band(new_style, bit.bnot(WIN_CONST.WS_EX_TOOLWINDOW))
+    local new_style = bit.band(bit.bor(ex_style, WIN_CONST.WS_EX_APPWINDOW), bit.bnot(WIN_CONST.WS_EX_TOOLWINDOW))
     SetWindowLongPtrW_Compat(hwnd,WIN_CONST.GWL_EXSTYLE,new_style)
     local flags = bit.bor(WIN_CONST.SWP_NOMOVE,WIN_CONST.SWP_NOSIZE,WIN_CONST.SWP_NOZORDER,WIN_CONST.SWP_FRAMECHANGED)
     user32.SetWindowPos(hwnd,ffi.NULL,0,0,0,0,flags)
@@ -275,22 +275,22 @@ local function find_process_windows()
             local title = get_window_title(hwnd)
             local process_name = get_process_name(hwnd) or ""
             process_name = process_name:lower()
-            log_all(string.format("process=%s class=%s title=%s",safe_string(process_name),safe_string(class_name),safe_string(title)))
+            log_all(string.format("process=%s class=%s title=%s",
+                safe_string(process_name), safe_string(class_name), safe_string(title)))
             if process_name~="" and state.process_processes[process_name] then
                 if is_process_window(class_name,title) then
                     table.insert(results,{hwnd=hwnd,process=process_name,class_name=class_name,title=title})
-                    log_debug("Matched window: "..process_name.." / "..class_name.." / "..title)
                 end
             end
         end)
-        if not ok then log_warn("EnumWindows 回调错误: "..tostring(err)) end
+        if not ok then log_info("EnumWindows 回调错误: "..tostring(err)) end
         return 1
     end
     state.enum_cb = ffi.cast("BOOL(*)(HWND,LONG_PTR)",enum_callback)
     local ok,err = pcall(function() user32.EnumWindows(state.enum_cb,0) end)
     state.enum_cb:free()
     state.enum_cb=nil
-    if not ok then log_warn("枚举窗口出错: "..tostring(err)) return {} end
+    if not ok then log_info("枚举窗口出错: "..tostring(err)) return {} end
     return results
 end
 
@@ -298,11 +298,11 @@ local function run_detection()
     state.stats.total_scans = state.stats.total_scans +1
     local windows = find_process_windows()
     if #windows==0 then
-        log_info_throttled("未检测到桌面窗口","no_windows",30)
+        log_info_throttled("未检测到窗口","no_windows",30)
         return
     end
     state.stats.total_windows_found = state.stats.total_windows_found + #windows
-    log_info(string.format("检测到 %d 个桌面窗口",#windows))
+    log_info(string.format("检测到 %d 个窗口",#windows))
     local modified = 0
     for i,w in ipairs(windows) do
         log_info(string.format("[%d] process=%s class=%s title=%s",i,safe_string(w.process),safe_string(w.class_name),safe_string(w.title)))
@@ -312,12 +312,12 @@ local function run_detection()
     if modified>0 then
         log_info(string.format("已修改 %d 个窗口为任务栏显示",modified))
     else
-        log_info("所有窗口已是任务栏显示状态，无需修改")
+        log_info("窗口已是任务栏显示状态，无需修改")
     end
 end
 
 -- 定时器
-local function timer_tick() local ok,err=pcall(run_detection) if not ok then log_warn("定时检测出错: "..tostring(err)) end end
+local function timer_tick() local ok,err=pcall(run_detection) if not ok then log_info("定时检测出错: "..tostring(err)) end end
 local function update_timer()
     obs.timer_remove(timer_tick)
     if state.enable_timer then
@@ -329,24 +329,22 @@ end
 -- OBS UI
 function script_properties()
     local props = obs.obs_properties_create()
-    obs.obs_properties_add_button(props,"btn_run","手动检测",function() run_detection() return true end)
-    obs.obs_properties_add_bool(props,"enable_timer","自动检测")
+    obs.obs_properties_add_button(props,"btn_run","手动",function() run_detection() return true end)
+    obs.obs_properties_add_bool(props,"enable_timer","自动")
     obs.obs_properties_add_int(props,"interval_sec","检测间隔(秒)",1,3600,1)
-    obs.obs_properties_add_bool(props,"debug_mode","调试模式")
-    obs.obs_properties_add_bool(props,"debug_print_all_windows","打印所有窗口")
-    obs.obs_properties_add_bool(props,"require_class_or_title_match","Class/Title 特征")
-    obs.obs_properties_add_text(props,"process_processes_text","process 名称（每行一个）",obs.OBS_TEXT_MULTILINE)
-    obs.obs_properties_add_text(props,"class_patterns_text","Class 特征（每行一个）",obs.OBS_TEXT_MULTILINE)
-    obs.obs_properties_add_text(props,"title_patterns_text","Title 特征（每行一个）",obs.OBS_TEXT_MULTILINE)
+    obs.obs_properties_add_bool(props,"print_all_windows","查找窗口信息")
+    obs.obs_properties_add_bool(props,"require_class_or_title_match","匹配 Class/Title")
+    obs.obs_properties_add_text(props,"process_processes_text","process 进程",obs.OBS_TEXT_MULTILINE)
+    obs.obs_properties_add_text(props,"class_patterns_text","Class 类",obs.OBS_TEXT_MULTILINE)
+    obs.obs_properties_add_text(props,"title_patterns_text","Title 标题",obs.OBS_TEXT_MULTILINE)
     return props
 end
 
 function script_defaults(settings)
     obs.obs_data_set_default_bool(settings,"enable_timer",false)
     obs.obs_data_set_default_int(settings,"interval_sec",5)
-    obs.obs_data_set_default_bool(settings,"debug_mode",false)
-    obs.obs_data_set_default_bool(settings,"debug_print_all_windows",false)
     obs.obs_data_set_default_bool(settings,"require_class_or_title_match",true)
+    obs.obs_data_set_default_bool(settings,"print_all_windows",false)
     obs.obs_data_set_default_string(settings,"process_processes_text",DEFAULT_CONFIG.PROCESS_PROCESSES_TEXT)
     obs.obs_data_set_default_string(settings,"class_patterns_text",DEFAULT_CONFIG.CLASS_PATTERNS_TEXT)
     obs.obs_data_set_default_string(settings,"title_patterns_text",DEFAULT_CONFIG.TITLE_PATTERNS_TEXT)
@@ -355,8 +353,7 @@ end
 function script_update(settings)
     state.enable_timer = obs.obs_data_get_bool(settings,"enable_timer")
     state.interval_sec = math.max(1, obs.obs_data_get_int(settings,"interval_sec"))
-    state.debug_mode = obs.obs_data_get_bool(settings,"debug_mode")
-    state.debug_print_all_windows = obs.obs_data_get_bool(settings,"debug_print_all_windows")
+    state.print_all_windows = obs.obs_data_get_bool(settings,"print_all_windows")
     rebuild_rules_from_settings(settings)
     update_timer()
 end
@@ -365,7 +362,7 @@ function script_description()
     return [[
 <h2>Detect Window to Taskbar</h2>
 <p>检测窗口到任务栏</p>
-<b>v</b> <a href="https://github.com/Alcg0711/detect-window-to-taskbar">0.1.0</a></p>
+<b>v</b> <a href="https://github.com/Alcg0711/detect-window-to-taskbar">0.1.1</a></p>
 <b>by</b> <a href="https://space.bilibili.com/11662625">Alcg</a>
 ]]
 end
